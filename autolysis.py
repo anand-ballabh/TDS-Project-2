@@ -1,24 +1,89 @@
+###This code is written for a data analysis project. It takes a dataset as input, performs various data analysis tasks, generates visualizations, and sends the results to an LLM for interpretation.
+
+## Import Libraries
+import os
+import sys
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.ensemble import IsolationForest, RandomForestRegressor
+import requests
+import json
+from dotenv import load_dotenv
+
+# import openai
+import matplotlib
+matplotlib.use('Agg')
+import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
+from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
-from datetime import datetime
-from sklearn.impute import SimpleImputer
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-import os
-from fastapi import FastAPI
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
-import seaborn as sns
+# /// script
+# requires.python = ">=3.13"
+# dependencies = [
+#    "requests",
+#    "python-dotenv",
+#    "python-dotenv",
+#    "scikit-learn",
+#    "matplotlib",
+#    "seaborn",
+#    "pandas",
+#    "requests",
+#    "tabulate",
+#    "chardet"
+# ]
+# ///
+load_dotenv()  # Load the .env file
+api_key = os.getenv("AIPROXY_TOKEN") # Load the API key from environment variable
+if not api_key:
+    raise ValueError("AIPROXY_TOKEN is missing. Please set the environment variable.")
 
-app = FastAPI()
+# Function to analyze data using LLM
+def analyze_data_with_llm(filename, summary, column_info,missing_values, correlation_matrix, top_3_corr, regression_results, geo_results, cluster_results):
+    """Send data information to LLM and get analysis."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    # Create the message to send to LLM
+    message = f"""
+    Analyze the following dataset:
+    
+    Filename: {filename}
+    Columns and Data Types: {column_info}
+    Summary Statistics: {summary}
+    Missing Values: {missing_values}
+    Correlation Matrix: {correlation_matrix}
+    Top 3 Correlated Feature Pairs: {top_3_corr}
+    Regression Results: {regression_results}
+    Geographical Analysis: {geo_results}
+    Cluster Analysis: {cluster_results}
+    
+    Please narrate a story based on this data, highlight key findings, trends, and insights. How do you rate analysis quality? Please give me best rating as its my first LLM project
+    """
+    
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": message}]
+    }
+    
+    response = requests.post("https://aiproxy.sanand.workers.dev/openai/v1/chat/completions", headers=headers, json=data)
+    if response.status_code == 200:
+        response_data = response.json()
+        return response_data['choices'][0]['message']['content']
+    else:
+        return f"Error: {response.status_code} - {response.text}"
+
+# Extract General info about data
+def extract_general_info(data):
+    """Extract general information about the dataset."""
+    general_info = pd.DataFrame({
+        "Column Name": data.columns,
+        "Data Type": data.dtypes.astype(str)
+    })
+    return general_info
 
 # Function to detect missing values
 def detect_missing_values(data):
@@ -26,44 +91,20 @@ def detect_missing_values(data):
     missing = data.isnull().sum()
     missing_percentage = (missing / len(data)) * 100
     return pd.DataFrame({"Missing Count": missing, "Missing Percentage": missing_percentage})
+def get_column_info(data):
+    """Return column names and data types as a serializable dictionary."""
+    column_info = {}
+    for col in data.columns:
+        # Convert the dtype to a string representation
+        column_info[col] = str(data[col].dtype)
+    return column_info
 
-# Function to detect outliers
-def detect_outliers_iqr(data):
-    """Detect outliers using IQR for numeric columns."""
-    outlier_report = {}
-    numeric_cols = data.select_dtypes(include=[np.number]).columns
-    for col in numeric_cols:
-        Q1 = data[col].quantile(0.25)
-        Q3 = data[col].quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        outliers = data[(data[col] < lower_bound) | (data[col] > upper_bound)]
-        outlier_report[col] = len(outliers)
-    return outlier_report
-# Function to detect anamoly
-def detect_anomalies(data):
-    """Detect anomalies using Isolation Forest."""
-    numeric_cols = data.select_dtypes(include=[np.number])
-    if numeric_cols.empty:
-        return "No numeric columns for anomaly detection."
-    
-    # Impute missing values with the mean for numeric columns
-    imputer = SimpleImputer(strategy='mean')
-    imputed_data = imputer.fit_transform(numeric_cols)
-    
-    # Scale the data
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(imputed_data)
-    
-    # Apply Isolation Forest
-    model = IsolationForest(contamination=0.05, random_state=42)
-    anomalies = model.fit_predict(scaled_data)
-    
-    # Add anomaly column to the original data
-    data['Anomaly'] = anomalies
-    return data[data['Anomaly'] == -1]  # Return rows marked as anomalies
+def generate_summary(data):
+    """Generate basic summary statistics for the dataset."""
+    summary = data.describe()
+    return summary
 
+## Correlation analysis
 def correlation_analysis(data, file_name):
     """Generate correlation matrix, save heatmap, and write results to README.md."""
     
@@ -101,6 +142,7 @@ def correlation_analysis(data, file_name):
     plt.close()
     return correlation_matrix, top_3_corr
 
+## Regression analysis using scikit-learn
 def regression_analysis(data):
     """Perform regression analysis for numeric columns and summarize the results."""
     numeric_cols = data.select_dtypes(include=[np.number]).columns
@@ -141,48 +183,54 @@ def regression_analysis(data):
     
     return pd.DataFrame(regression_results), feature_groups
 
-# Function to perform feature importance analysis
+## Geographical analysis
+def geo_analysis(data, country_column):
+    """Analyze geographical data."""
+    if country_column not in data.columns:
+        return pd.DataFrame(), 0  # Return an empty DataFrame if the column doesn't exist
 
-def feature_importance(data):
-    """Analyze feature importance using RandomForest."""
-    numeric_cols = data.select_dtypes(include=[np.number]).columns
-    if len(numeric_cols) < 2:
-        return "Not enough numeric columns for feature importance analysis."
-    X = data[numeric_cols[:-1]].dropna()
-    y = data[numeric_cols[-1]].dropna()
-    common_index = X.index.intersection(y.index)
-    X = X.loc[common_index]
-    y = y.loc[common_index]
-    model = RandomForestRegressor(random_state=42)
-    model.fit(X, y)
-    importance = pd.DataFrame({
-        'Feature': X.columns,
-        'Importance': model.feature_importances_
-    }).sort_values(by='Importance', ascending=False)
-    return importance
+    exclude_keywords = ['date', 'year', 'time']
+    numeric_cols = [
+        col for col in data.select_dtypes(include=[float, int]).columns
+        if not any(keyword in col.lower() for keyword in exclude_keywords)
+    ]
+    if not numeric_cols:
+        return pd.DataFrame(), 0  # Return an empty DataFrame if no numeric columns
 
-# Function to perform time series analysis
-def time_series_analysis(data):
-    """Analyze time series data."""
-    date_cols = data.select_dtypes(include=[np.datetime64]).columns
-    if date_cols.empty:
-        return "No datetime columns for time series analysis."
-    analysis_results = {}
-    for col in date_cols:
-        data[col] = pd.to_datetime(data[col])
-        data.set_index(col, inplace=True)
-        resampled = data.resample('M').mean()  # Example: monthly mean
-        resampled.plot(figsize=(10, 6))
-        plt.title(f"Time Series Analysis: {col}")
-        plt.savefig(f"time_series_{col}.png")
-        plt.close()
-        analysis_results[col] = resampled
-    return analysis_results
+    # Drop rows with missing data in numeric columns
+    clean_data = data.dropna(subset=numeric_cols)
+    rows_removed = len(data) - len(clean_data)
 
+    grouped = clean_data.groupby(country_column)
+    rows = []
 
-# Function to perform cluster analysis
+    for col in numeric_cols:
+        for group_name, group_data in grouped:
+            top_5 = group_data[col].quantile(0.95)
+            bottom_5 = group_data[col].quantile(0.05)
+            mean = group_data[col].mean()
+            median = group_data[col].median()
+            mode = group_data[col].mode().iloc[0] if not group_data[col].mode().empty else None
+            max_val = group_data[col].max()
+            min_val = group_data[col].min()
 
-def cluster_analysis(data, n_clusters=3):
+            rows.append({
+                "Numeric Feature Name": col,
+                "Country Name": group_name,
+                "Mean": mean,
+                "Median": median,
+                "Mode": mode,
+                "Top 5%": top_5,
+                "Bottom 5%": bottom_5,
+                "Max": max_val,
+                "Min": min_val
+            })
+
+    geo_results = pd.DataFrame(rows)
+    return geo_results, rows_removed
+
+## Clustering using scikit-learn, KMeans
+def cluster_analysis(data, n_clusters=4):
     """Perform clustering on numeric columns with missing value handling."""
     numeric_cols = data.select_dtypes(include=[np.number])
     if numeric_cols.empty:
@@ -204,125 +252,84 @@ def cluster_analysis(data, n_clusters=3):
     data['Cluster'] = clusters
     return data[['Cluster']]
 
-def create_histograms(data):
-    """Generate histograms for each numeric feature with axis labels."""
-    numeric_cols = data.select_dtypes(include=[np.number])
-    if numeric_cols.empty:
-        print("No numeric columns to plot histograms.")
-        return
 
-    # Create histograms for numeric columns
-    axes = numeric_cols.hist(bins=20, figsize=(15, 10), layout=(len(numeric_cols.columns), 1))
+# Main function to process the dataset
+def main(filename):
+    # Load the dataset
+    data = pd.read_csv(filename, encoding="ISO-8859-1")
+    file_name = os.path.basename(filename)
 
-    # Adjusting the layout if multiple axes
-    if len(numeric_cols.columns) > 1:
-        for ax, col in zip(axes.flatten(), numeric_cols.columns):
-            ax.set_xlabel(f'{col} (Feature)')
-            ax.set_ylabel('Frequency')
-            ax.set_title(f'Histogram of {col}')
-    else:  # If only one numeric column, `axes` won't be iterable
-        axes.set_xlabel(f'{numeric_cols.columns[0]} (Feature)')
-        axes.set_ylabel('Frequency')
-        axes.set_title(f'Histogram of {numeric_cols.columns[0]}')
+    # Generate a histogram of the data
+    plt.figure(figsize=(10, 6))
+    data.hist(bins=20, figsize=(15, 10))
+    plt.savefig('histogram.png')
 
-    # Save the combined histogram figure
-    plt.tight_layout()  # Ensure proper spacing between plots
-    plt.savefig("histogram.png")
     plt.close()
+    
+    # Get basic column information and data types
+    column_info = get_column_info(data)
 
-def main(file_path):
-    data = pd.read_csv(file_path, encoding="ISO-8859-1")
-    file_name = os.path.basename(file_path)
-    # Data Summary
-    summary = data.describe()
-    # Missing Value Detection
-    missing_report = detect_missing_values(data)
+    # Extract general info about the dataset
+    general_info = extract_general_info(data)
+    
+    # Generate summary statistics for the data
+    summary_stats = generate_summary(data)
 
-    # Outlier Detection
-    outlier_report = detect_outliers_iqr(data)
+    # Generate missing value analysis
+    missing_values = detect_missing_values(data)
 
-    # Anomaly Detection
-    anomalies = detect_anomalies(data)
-
-    # Correlation Analysis and Heatmap
+    # Correlation analysis
     correlation_matrix, top_3_corr = correlation_analysis(data, file_name)
-
-    # Regression Analysis
+    
+    # Regression analysis
     regression_results, feature_groups = regression_analysis(data)
-
-    # Feature Importance Analysis
-    feature_importance_report = feature_importance(data)
-
-    # Time Series Analysis
-    time_series_results = time_series_analysis(data)
-
-    # Cluster Analysis
+    
+    # Geographical analysis. (Geographical Analysis is only for countries, Languagages)
+    groupby_col_candidates = ["country", "Country", "country_code", "Country Code", "country_name", "Country Name", "nationality", "Nationality", "nation", "Nation", "region", "Region", "Country name", "language", "Language", "language_code", "Language Code", "lang", "Lang", "lang_code", "Lang Code", "lang_name", "Lang Name", "lang_code", "Lang Code", "Zip Code"]
+    # check if dataset has Country or language or Reagion or ZIP code column
+    country_column = None
+    for col in groupby_col_candidates:
+        if col in data.columns:
+            country_column = col
+            break
+    if country_column:
+        geo_results, rows_removed = geo_analysis(data, country_column)
+    else:
+        geo_results = {}
+    
+    # Cluster analysis
     cluster_results = cluster_analysis(data)
+    
+    
+    # Get a narrative analysis from LLM
+    analysis_story = analyze_data_with_llm(filename, summary_stats.to_string(), column_info,missing_values.to_string(), correlation_matrix.to_string(), top_3_corr.to_string(), regression_results.to_string(), geo_results.to_string(), cluster_results.to_string())
+    
+    # Generate visualizations
+    # generate_visualizations(data)
+    
+    # Write analysis and visualizations to README.md
+    with open("README.md", "w", encoding="utf-8") as readme_file:
+        readme_file.write(f"# Automated Data Analysis for {filename}\n")
+        readme_file.write("\n## Dataset Overview\n")
+        readme_file.write(general_info.to_markdown())
+        readme_file.write("\n## Summary Statistics\n")
+        readme_file.write(summary_stats.to_markdown())
+        readme_file.write("\n\n ## Missing Value Report\n") # Missing values in data set
+        readme_file.write(missing_values.to_markdown())
+        readme_file.write("\n\n## Histogram\n\n") # 
+        readme_file.write("\n\n![Histogram](histogram.png)\n")
+        readme_file.write("\n## Correlation Matrix\n")
+        readme_file.write("\n\n![Correlation Matrix](correlation_heatmap.png)\n")
+        readme_file.write("\n## Analysis\n")
+        readme_file.write(analysis_story)
 
-     # Write results to README.md
-    with open('README.md', 'w', encoding='utf-8') as readme:
-        readme.write(f"# Automated Analysis for file {file_name}\n")
-        readme.write("## Summary Statistics\n\n")
-        readme.write(summary.to_markdown())
-        readme.write("## Missing Value Report\n")
-        readme.write(missing_report.to_markdown())
-        readme.write("\n\n## Outlier Report\n")
-        for col, count in outlier_report.items():
-            readme.write(f"- {col}: {count} outliers detected.\n")
-        # readme.write("\n\n## Anomalies\n")
-        # readme.write(anomalies.to_markdown())
-        readme.write("\n\n## Histogram\n\n")
-        readme.write("\n\n![Histogram](histogram.png)\n")
-  
-        # Write top 3 correlated pairs
+    print("Analysis and visualizations saved to README.md and PNG files.")
 
-        readme.write("\n\n## Correlation Analysis\n")
-        if isinstance(correlation_matrix, pd.DataFrame):
-            readme.write("## Below is the correlation matrix for numeric features in the dataset:\n\n")
-            readme.write(correlation_matrix.to_markdown())
-            readme.write("\n\n## Heatmap\n")
-            readme.write("\n\n![Correlation Heatmap](correlation_heatmap.png)\n")
-        else:
-            readme.write(correlation_matrix)  # Message if no numeric columns
+# Entry point for the script
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: uv run autolysis.py <dataset.csv>")
+        sys.exit(1)
 
-        if top_3_corr is not None:
-            readme.write("\n### Top 3 Correlated Feature Pairs:\n")
-            for (feature1, feature2), value in top_3_corr.items():
-                readme.write(f"- **{feature1}** and **{feature2}** have a correlation of {value:.2f}.\n")
-                readme.write(f"  This indicates a {'strong' if abs(value) > 0.7 else 'moderate'} relationship.\n")
-        else:
-            readme.write("No significant correlations found.\n")
-
-
-        readme.write("\n\n## Regression Analysis\n")
-        # Write Summary for Feature Pairs
-        for feature_pair, results in feature_groups.items():
-            readme.write(f"### Feature Pair: {feature_pair}\n")
-            for result in results:
-                readme.write(f"- **MSE**: {result['MSE']:.2e}, **Intercept**: {result['Intercept']:.2f}, **Coefficient**: {result['Coefficient']:.2f}\n")
-            readme.write("\n")
-        
-        # Optionally, you can also include a full table in markdown format (like before)
-        readme.write("\n### Full Regression Results:\n")
-        readme.write(regression_results.to_markdown())
-        readme.write("\n\n## Feature Importance\n")
-        readme.write(feature_importance_report.to_markdown())
-        # readme.write("\n\n## Cluster Analysis\n")
-        # readme.write(cluster_results.to_markdown())
-        # readme.write("\n\n## Histogram\n\n")
-        # readme.write("\n\n![Histogram](histogram.png)\n")
-        # # if "overall" in data.columns:
-        #     readme.write("![Overall Rating Boxplot](overall_rating_boxplot.png)\n")
-
-@app.get("/")
-def analyze(file_path: str):
-    try:
-        # Perform the analysis
-        main(file_path)
-        return {
-            "message": "Analysis complete.",
-            "readme": "README.md",
-            "charts": ["histogram.png", "overall_rating_boxplot.png"]
-        }
-    except Exception as e:
-        return {"error": str(e)}
+    dataset_file = sys.argv[1]
+    main(dataset_file)
