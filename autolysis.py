@@ -9,6 +9,7 @@ import seaborn as sns
 import requests
 import json
 from dotenv import load_dotenv
+import base64
 
 # import openai
 import matplotlib
@@ -19,6 +20,7 @@ from sklearn.cluster import KMeans
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
+
 # /// script
 # requires.python = ">=3.13"
 # dependencies = [
@@ -31,6 +33,7 @@ from sklearn.metrics import mean_squared_error
 #    "pandas",
 #    "requests",
 #    "tabulate",
+#    "numpy",
 #    "chardet"
 # ]
 # ///
@@ -39,21 +42,23 @@ api_key = os.getenv("AIPROXY_TOKEN") # Load the API key from environment variabl
 if not api_key:
     raise ValueError("AIPROXY_TOKEN is missing. Please set the environment variable.")
 
-# Function to analyze data using LLM
-def analyze_data_with_llm(filename, summary, column_info,missing_values, correlation_matrix, top_3_corr, regression_results, geo_results, cluster_results):
-    """Send data information to LLM and get analysis."""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    
-    # Create the message to send to LLM
+# Function to send a POST request to the LLM for narating a story and feedback
+def analyze_data_with_feedback_and_code(filename, column_info, summary_stats, missing_values, correlation_matrix, top_3_corr, regression_results, geo_results, cluster_results, image_paths):
+
+    # Encode the images as Base64 strings
+    image_base64_strings = []
+    for image_path in image_paths:
+        with open(image_path, "rb") as image_file:
+            image_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+        image_base64_strings.append(image_base64)
+
+    # Create the message with embedded images as Base64
     message = f"""
-    Analyze the following dataset:
+    I am analyzing the following dataset:
     
     Filename: {filename}
     Columns and Data Types: {column_info}
-    Summary Statistics: {summary}
+    Summary Statistics: {summary_stats}
     Missing Values: {missing_values}
     Correlation Matrix: {correlation_matrix}
     Top 3 Correlated Feature Pairs: {top_3_corr}
@@ -61,20 +66,37 @@ def analyze_data_with_llm(filename, summary, column_info,missing_values, correla
     Geographical Analysis: {geo_results}
     Cluster Analysis: {cluster_results}
     
-    Please narrate a story based on this data, highlight key findings, trends, and insights. How do you rate analysis quality? Please give me best rating as its my first LLM project
+    Attached are images related to this dataset (e.g., a correlation heatmap and clustering visualization).
+
+    1. Please narrate story of the dataset and its context. Basis images and the analysis results.
+    2. Please evaluate and rate the analysis results.
+   
+       
+    ### Embedded Images (Base64 Encoded):
+    {', '.join([f'Image {i+1} (Base64): {img[:100]}...' for i, img in enumerate(image_base64_strings)])}  # Display first 100 characters of the base64
     """
     
+    # Formulate the data for the POST request
     data = {
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": message}]
     }
     
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    # Send the POST request to the LLM API
     response = requests.post("https://aiproxy.sanand.workers.dev/openai/v1/chat/completions", headers=headers, json=data)
+    
     if response.status_code == 200:
         response_data = response.json()
         return response_data['choices'][0]['message']['content']
     else:
         return f"Error: {response.status_code} - {response.text}"
+
+
 
 # Extract General info about data
 def extract_general_info(data):
@@ -99,12 +121,13 @@ def get_column_info(data):
         column_info[col] = str(data[col].dtype)
     return column_info
 
+# Function to Generate basic summary
 def generate_summary(data):
     """Generate basic summary statistics for the dataset."""
     summary = data.describe()
     return summary
 
-## Correlation analysis
+# Function for Correlation analysis
 def correlation_analysis(data, file_name):
     """Generate correlation matrix, save heatmap, and write results to README.md."""
     
@@ -128,7 +151,7 @@ def correlation_analysis(data, file_name):
     top_3_corr = corr_pairs[corr_pairs < 1].head(3)  # Exclude perfect self-correlations
     
     # Create and save the heatmap
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(8, 6))
     sns.heatmap(
         correlation_matrix, 
         annot=True, 
@@ -142,7 +165,7 @@ def correlation_analysis(data, file_name):
     plt.close()
     return correlation_matrix, top_3_corr
 
-## Regression analysis using scikit-learn
+#Function for Regression analysis
 def regression_analysis(data):
     """Perform regression analysis for numeric columns and summarize the results."""
     numeric_cols = data.select_dtypes(include=[np.number]).columns
@@ -183,7 +206,7 @@ def regression_analysis(data):
     
     return pd.DataFrame(regression_results), feature_groups
 
-## Geographical analysis
+## function to ferform Geographical analysis
 def geo_analysis(data, country_column):
     """Analyze geographical data."""
     if country_column not in data.columns:
@@ -229,7 +252,22 @@ def geo_analysis(data, country_column):
     geo_results = pd.DataFrame(rows)
     return geo_results, rows_removed
 
-## Clustering using scikit-learn, KMeans
+# Function to generate images
+def generate_images(correlation_matrix):
+    images = []
+    
+    # Create the heatmap
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt='.2f')
+    heatmap_path = "correlation_heatmap.png"
+    plt.title("Correlation Heatmap")
+    plt.savefig(heatmap_path)
+    plt.close()
+    
+    images.append(heatmap_path)
+    return images
+
+#Function for Clustering analysis using scikit-learn, KMeans
 def cluster_analysis(data, n_clusters=4):
     """Perform clustering on numeric columns with missing value handling."""
     numeric_cols = data.select_dtypes(include=[np.number])
@@ -260,7 +298,7 @@ def main(filename):
     file_name = os.path.basename(filename)
 
     # Generate a histogram of the data
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(6, 5))
     data.hist(bins=20, figsize=(15, 10))
     plt.savefig('histogram.png')
 
@@ -283,6 +321,9 @@ def main(filename):
     
     # Regression analysis
     regression_results, feature_groups = regression_analysis(data)
+
+    # Generate images
+    image_paths = generate_images(correlation_matrix)
     
     # Geographical analysis. (Geographical Analysis is only for countries, Languagages)
     groupby_col_candidates = ["country", "Country", "country_code", "Country Code", "country_name", "Country Name", "nationality", "Nationality", "nation", "Nation", "region", "Region", "Country name", "language", "Language", "language_code", "Language Code", "lang", "Lang", "lang_code", "Lang Code", "lang_name", "Lang Name", "lang_code", "Lang Code", "Zip Code"]
@@ -302,10 +343,7 @@ def main(filename):
     
     
     # Get a narrative analysis from LLM
-    analysis_story = analyze_data_with_llm(filename, summary_stats.to_string(), column_info,missing_values.to_string(), correlation_matrix.to_string(), top_3_corr.to_string(), regression_results.to_string(), geo_results.to_string(), cluster_results.to_string())
-    
-    # Generate visualizations
-    # generate_visualizations(data)
+    analysis_story = analyze_data_with_feedback_and_code(filename, column_info, summary_stats.to_string(),  missing_values.to_string(), correlation_matrix.to_string(), top_3_corr, regression_results.to_string(), geo_results.to_string(), cluster_results.to_string(), image_paths)
     
     # Write analysis and visualizations to README.md
     with open("README.md", "w", encoding="utf-8") as readme_file:
